@@ -583,7 +583,8 @@ struct GTPEngine {
         return;
 
       scoreArrived = true;
-      lastScore = buf[0].winLossValue;
+      // winLossValue is white perspective, so negate for black perspective.
+      lastScore = -buf[0].winLossValue;
     };
   }
 
