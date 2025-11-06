@@ -194,6 +194,9 @@ struct GTPEngine {
   std::vector<Sgf::PositionSample> genmoveSamples;
   stringstream sstream;
 
+  bool scoreArrived = false;
+  double lastScore = 0.0;
+
   GTPEngine(
     const string& modelFile, const string& hModelFile,
     SearchParams initialGenmoveParams, SearchParams initialAnalysisParams,
@@ -566,6 +569,24 @@ struct GTPEngine {
     };
   }
 
+  std::function<void(const Search* search)> getCoarseAnalyzeCallback(Player pla, AnalyzeArgs args) {
+    //Avoid capturing anything by reference except [this], since this will potentially be used
+    //asynchronously and called after we return
+    return [args,pla,this](const Search* search) {
+      vector<AnalysisData> buf;
+      bool duplicateForSymmetries = true;
+      search->getAnalysisData(buf,args.minMoves,false,analysisPVLen,duplicateForSymmetries);
+      filterZeroVisitMoves(args,buf);
+      if(buf.size() > args.maxMoves)
+        buf.resize(args.maxMoves);
+      if(buf.size() <= 0)
+        return;
+
+      scoreArrived = true;
+      lastScore = buf[0].winLossValue;
+    };
+  }
+
   void genMove(
     Player pla,
     Logger& logger,
@@ -897,6 +918,25 @@ struct GTPEngine {
     double searchFactor = 1e40; //go basically forever
     bot->analyzeAsync(pla, searchFactor, args.secondsPerReport, args.secondsPerReport, callback);
   }
+
+  void coarseAnalyze(Player pla, AnalyzeArgs args) {
+    scoreArrived = false;
+    lastScore = 0.0;
+
+    assert(args.analyzing);
+    if(isGenmoveParams) {
+      bot->setParams(analysisParams);
+      isGenmoveParams = false;
+    }
+
+    std::function<void(const Search* search)> callback = getCoarseAnalyzeCallback(pla,args);
+    bot->setAvoidMoveUntilByLoc(args.avoidMoveUntilByLocBlack,args.avoidMoveUntilByLocWhite);
+    bot->setAlwaysIncludeOwnerMap(false);
+
+    double searchFactor = 1e40; //go basically forever
+    bot->analyzeAsync(pla, searchFactor, args.secondsPerReport, args.secondsPerReport, callback);
+  }
+
 
   void computeAnticipatedWinnerAndScore(Player& winner, double& finalWhiteMinusBlackScore) {
     stopAndWait();
@@ -1513,6 +1553,42 @@ Java_io_github_karino2_paoogo_goengine_katago_KataGoNative_analyze (
   }
   g_engine->stopAndWait();
   return env->NewStringUTF(result.c_str());
+}
+
+
+/*
+  グラフ表示のために、早くいい加減なスコアを返す。
+  -1.0 から 1.0
+  を返す。
+*/
+jdouble
+Java_io_github_karino2_paoogo_goengine_katago_KataGoNative_score (
+	JNIEnv*	env,
+	jclass clasz,
+  jint msec,
+  jboolean isBlack
+	)
+{
+  Player pla = IsBlackToColor(isBlack);
+  GTPEngine::AnalyzeArgs args;
+  args.analyzing = true;
+  args.secondsPerReport = (((double)msec)/1000.0) - 0.1;
+  args.minMoves = 0;
+  args.maxMoves = 10000000;
+  args.avoidMoveUntilByLocBlack = vector<int>{};
+  args.avoidMoveUntilByLocWhite = vector<int>{};
+
+  g_engine->coarseAnalyze(pla, args);
+  std::this_thread::sleep_for(std::chrono::milliseconds(msec));
+
+  auto timeout_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(msec * 5);
+  while (std::chrono::steady_clock::now() < timeout_time) {
+    if (g_engine->scoreArrived)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  g_engine->stopAndWait();
+  return g_engine->lastScore;
 }
 
 
